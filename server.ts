@@ -51,14 +51,14 @@ app.post('/api/meetings', (req, res) => {
     stmt.run(id, descricao, criador_token);
     res.json({ success: true, id });
   } catch (e) {
-    res.status(500).json({ error: 'Erro ao criar reunião' });
+    res.status(500).json({ error: 'Erro ao criar reuniao' });
   }
 });
 
 // Get meeting
 app.get('/api/meetings/:id', (req, res) => {
   const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id);
-  if (!meeting) return res.status(404).json({ error: 'Reunião não encontrada' });
+  if (!meeting) return res.status(404).json({ error: 'Reuniao nao encontrada' });
   const participantes = db.prepare('SELECT DISTINCT nome FROM disponibilidades WHERE meeting_id = ?').all(req.params.id);
   res.json({ ...meeting, participantes: participantes.map((p: any) => p.nome) });
 });
@@ -83,8 +83,8 @@ app.post('/api/meetings/:id/disponibilidades', (req, res) => {
 app.post('/api/meetings/:id/fechar', (req, res) => {
   const { criador_token } = req.body;
   const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id) as any;
-  if (!meeting) return res.status(404).json({ error: 'Reunião não encontrada' });
-  if (meeting.criador_token !== criador_token) return res.status(403).json({ error: 'Sem permissão' });
+  if (!meeting) return res.status(404).json({ error: 'Reuniao nao encontrada' });
+  if (meeting.criador_token !== criador_token) return res.status(403).json({ error: 'Sem permissao' });
   db.prepare('UPDATE meetings SET fechado = 1 WHERE id = ?').run(req.params.id);
   res.json({ success: true });
 });
@@ -92,24 +92,19 @@ app.post('/api/meetings/:id/fechar', (req, res) => {
 // Get results
 app.get('/api/meetings/:id/resultados', (req, res) => {
   const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id) as any;
-  if (!meeting) return res.status(404).json({ error: 'Reunião não encontrada' });
-  
+  if (!meeting) return res.status(404).json({ error: 'Reuniao nao encontrada' });
   const participantes = db.prepare('SELECT DISTINCT nome FROM disponibilidades WHERE meeting_id = ?').all(req.params.id) as any[];
   const totalParticipantes = participantes.length;
-  
   if (totalParticipantes === 0) return res.json({ resultados: [], totalParticipantes: 0 });
-  
   const slotsLivres = db.prepare(
     'SELECT dia, hora, nome FROM disponibilidades WHERE meeting_id = ? AND disponivel = 1'
   ).all(req.params.id) as any[];
-  
   const slotMap: Record<string, Set<string>> = {};
   for (const slot of slotsLivres) {
     const key = `${slot.dia}|${slot.hora}`;
     if (!slotMap[key]) slotMap[key] = new Set();
     slotMap[key].add(slot.nome);
   }
-  
   const resultados = Object.entries(slotMap)
     .map(([key, nomes]) => {
       const [dia, hora] = key.split('|');
@@ -118,7 +113,6 @@ app.get('/api/meetings/:id/resultados', (req, res) => {
     .filter(r => r.count > 0)
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
-  
   res.json({ resultados, totalParticipantes });
 });
 
@@ -130,4 +124,18 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+
+  // Self-ping to prevent Render free tier from sleeping
+  // Pings every 14 minutes (Render sleeps after 15 min of inactivity)
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+  if (RENDER_URL) {
+    setInterval(async () => {
+      try {
+        const res = await fetch(`${RENDER_URL}/health`);
+        console.log(`Keep-alive ping: ${res.status} at ${new Date().toISOString()}`);
+      } catch (e) {
+        console.log('Keep-alive ping failed:', e);
+      }
+    }, 14 * 60 * 1000); // 14 minutes
+  }
 });
