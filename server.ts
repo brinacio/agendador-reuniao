@@ -10,78 +10,119 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
 // Database
 const db = new Database('meetings.db');
 
-// Create table if not exists
+// Create tables
 db.exec(`
   CREATE TABLE IF NOT EXISTS meetings (
+    id TEXT PRIMARY KEY,
+    descricao TEXT NOT NULL,
+    criador_token TEXT NOT NULL,
+    fechado INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS disponibilidades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT,
-    date TEXT NOT NULL,
-    time TEXT NOT NULL,
-    duration INTEGER DEFAULT 60,
-    participants TEXT,
-    link TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  )
+    meeting_id TEXT NOT NULL,
+    nome TEXT NOT NULL,
+    dia TEXT NOT NULL,
+    hora TEXT NOT NULL,
+    disponivel INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id)
+  );
 `);
 
 // API Routes
-app.get('/api/meetings', (req, res) => {
-  const meetings = db.prepare('SELECT * FROM meetings ORDER BY date, time').all();
-  res.json(meetings);
+
+// Create meeting
+app.post('/api/meetings', (req, res) => {
+  const { id, descricao, criador_token } = req.body;
+  try {
+    const stmt = db.prepare('INSERT INTO meetings (id, descricao, criador_token) VALUES (?, ?, ?)');
+    stmt.run(id, descricao, criador_token);
+    res.json({ success: true, id });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao criar reunião' });
+  }
 });
 
+// Get meeting
 app.get('/api/meetings/:id', (req, res) => {
   const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id);
-  if (!meeting) return res.status(404).json({ error: 'Meeting not found' });
-  res.json(meeting);
+  if (!meeting) return res.status(404).json({ error: 'Reunião não encontrada' });
+  const participantes = db.prepare('SELECT DISTINCT nome FROM disponibilidades WHERE meeting_id = ?').all(req.params.id);
+  res.json({ ...meeting, participantes: participantes.map((p: any) => p.nome) });
 });
 
-app.post('/api/meetings', (req, res) => {
-  const { title, description, date, time, duration, participants, link } = req.body;
-  if (!title || !date || !time) {
-    return res.status(400).json({ error: 'Title, date and time are required' });
+// Save availability
+app.post('/api/meetings/:id/disponibilidades', (req, res) => {
+  const { nome, slots } = req.body;
+  const meeting_id = req.params.id;
+  try {
+    // Delete existing entries for this person
+    db.prepare('DELETE FROM disponibilidades WHERE meeting_id = ? AND nome = ?').run(meeting_id, nome);
+    // Insert new entries
+    const stmt = db.prepare('INSERT INTO disponibilidades (meeting_id, nome, dia, hora, disponivel) VALUES (?, ?, ?, ?, ?)');
+    for (const slot of slots) {
+      stmt.run(meeting_id, nome, slot.dia, slot.hora, slot.disponivel ? 1 : 0);
+    }
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao salvar disponibilidades' });
   }
-  const result = db.prepare(
-    'INSERT INTO meetings (title, description, date, time, duration, participants, link) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(title, description, date, time, duration || 60, participants, link);
-  const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(result.lastInsertRowid);
-  res.status(201).json(meeting);
 });
 
-app.put('/api/meetings/:id', (req, res) => {
-  const { title, description, date, time, duration, participants, link } = req.body;
-  const existing = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Meeting not found' });
-  db.prepare(
-    'UPDATE meetings SET title=?, description=?, date=?, time=?, duration=?, participants=?, link=? WHERE id=?'
-  ).run(title, description, date, time, duration, participants, link, req.params.id);
-  const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id);
-  res.json(meeting);
+// Close meeting and get results
+app.post('/api/meetings/:id/fechar', (req, res) => {
+  const { criador_token } = req.body;
+  const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id) as any;
+  if (!meeting) return res.status(404).json({ error: 'Reunião não encontrada' });
+  if (meeting.criador_token !== criador_token) return res.status(403).json({ error: 'Sem permissão' });
+  db.prepare('UPDATE meetings SET fechado = 1 WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
 });
 
-app.delete('/api/meetings/:id', (req, res) => {
-  const existing = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Meeting not found' });
-  db.prepare('DELETE FROM meetings WHERE id = ?').run(req.params.id);
-  res.status(204).send();
+// Get results
+app.get('/api/meetings/:id/resultados', (req, res) => {
+  const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id) as any;
+  if (!meeting) return res.status(404).json({ error: 'Reunião não encontrada' });
+  
+  const participantes = db.prepare('SELECT DISTINCT nome FROM disponibilidades WHERE meeting_id = ?').all(req.params.id) as any[];
+  const totalParticipantes = participantes.length;
+  
+  if (totalParticipantes === 0) return res.json({ resultados: [], totalParticipantes: 0 });
+  
+  // Get all available slots
+  const slotsLivres = db.prepare(
+    'SELECT dia, hora, nome FROM disponibilidades WHERE meeting_id = ? AND disponivel = 1'
+  ).all(req.params.id) as any[];
+  
+  // Count overlaps
+  const slotMap: Record<string, Set<string>> = {};
+  for (const slot of slotsLivres) {
+    const key = `${slot.dia}|${slot.hora}`;
+    if (!slotMap[key]) slotMap[key] = new Set();
+    slotMap[key].add(slot.nome);
+  }
+  
+  const resultados = Object.entries(slotMap)
+    .map(([key, nomes]) => {
+      const [dia, hora] = key.split('|');
+      return { dia, hora, nomes: Array.from(nomes), count: nomes.size };
+    })
+    .filter(r => r.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+  
+  res.json({ resultados, totalParticipantes });
 });
 
-app.get('/api/meetings/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
-// Serve static files from dist
+// Serve static files in production
 app.use(express.static(path.join(__dirname, 'dist')));
-
-// Fallback to index.html for SPA
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
