@@ -36,6 +36,11 @@ db.exec(`
   );
 `);
 
+// Health check - keeps service alive
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 // API Routes
 
 // Create meeting
@@ -63,9 +68,7 @@ app.post('/api/meetings/:id/disponibilidades', (req, res) => {
   const { nome, slots } = req.body;
   const meeting_id = req.params.id;
   try {
-    // Delete existing entries for this person
     db.prepare('DELETE FROM disponibilidades WHERE meeting_id = ? AND nome = ?').run(meeting_id, nome);
-    // Insert new entries
     const stmt = db.prepare('INSERT INTO disponibilidades (meeting_id, nome, dia, hora, disponivel) VALUES (?, ?, ?, ?, ?)');
     for (const slot of slots) {
       stmt.run(meeting_id, nome, slot.dia, slot.hora, slot.disponivel ? 1 : 0);
@@ -76,7 +79,7 @@ app.post('/api/meetings/:id/disponibilidades', (req, res) => {
   }
 });
 
-// Close meeting and get results
+// Close meeting
 app.post('/api/meetings/:id/fechar', (req, res) => {
   const { criador_token } = req.body;
   const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(req.params.id) as any;
@@ -96,12 +99,10 @@ app.get('/api/meetings/:id/resultados', (req, res) => {
   
   if (totalParticipantes === 0) return res.json({ resultados: [], totalParticipantes: 0 });
   
-  // Get all available slots
   const slotsLivres = db.prepare(
     'SELECT dia, hora, nome FROM disponibilidades WHERE meeting_id = ? AND disponivel = 1'
   ).all(req.params.id) as any[];
   
-  // Count overlaps
   const slotMap: Record<string, Set<string>> = {};
   for (const slot of slotsLivres) {
     const key = `${slot.dia}|${slot.hora}`;
@@ -121,7 +122,7 @@ app.get('/api/meetings/:id/resultados', (req, res) => {
   res.json({ resultados, totalParticipantes });
 });
 
-// Serve static files in production
+// Serve static files
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
